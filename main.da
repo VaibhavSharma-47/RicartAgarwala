@@ -1,0 +1,386 @@
+
+## RA Timestamp clear version
+
+class RATimestamp(DistProcess):
+   def setup(s, nreqs_tmp):
+      defer = []
+      reqc = 0
+      requesting = False
+      nreqs_p = nreqs_tmp
+      finish = []
+
+   def cs(task):
+
+      # to enter cs, enqueue and send request to all
+      --request
+      output("request cs")
+      requesting = True
+      reqc = logical_clock()
+      send(Request(reqc, self), s)
+
+      await (all(any(c2 > reqc for c2 in received(Reply(c2, p2))) for p2 in s))
+
+      # critical section
+      task()
+      work()
+
+      # to exit cs, dequeue and send release to all
+      --release
+      output("release cs")
+      send(Reply(logical_clock(), self), defer)
+      defer = []
+      requesting = False
+      nreqs_p -= 1
+      if nreqs_p == 0:
+        if len(finish) == len(s):
+           send(Exit(self), finish)
+           sys.exit(0)
+        else:
+           send(Finish(self), s)
+           await(False)
+
+   def main():
+      def anounce():
+          output("In cs!")
+      while True:
+          cs(anounce)
+
+   # when receiving request from others, enque and reply
+   def OnRequest(req, srcid):
+      if ((reqc > req or ( reqc == req and self < srcid)) or (requesting == False)):
+          send(Reply(logical_clock(), self), _source)
+      else:
+          if all(p2 != srcid for p2 in defer):
+              defer.append(srcid)
+
+   def OnFinish(srcid):
+      finish.append(srcid)
+
+   def OnExit(srcid):
+      sys.exit(0)
+
+## RA Timestamp efficient version
+
+class RATimestamp_eff(DistProcess):
+   def setup(s, nreqs_tmp):
+      defer = []
+      reqc = 0
+      requesting = False
+      nreqs_p = nreqs_tmp
+      recv_reply_count = 0
+      earlier = []
+      finish = []
+
+   def cs(task):
+
+      # to enter cs, enqueue and send request to all
+      --request
+      output("request cs")
+      requesting = True
+      reqc = logical_clock()
+      send(Request(reqc, self), s)
+
+      await (recv_reply_count == len(s))
+      recv_reply_count = 0
+      earlier = []
+
+      # critical section
+      task()
+      work()
+
+      # to exit cs, dequeue and send release to all
+      --release
+      output("release cs")
+      send(Reply(logical_clock(), self), defer)
+      defer = []
+      requesting = False
+      nreqs_p -= 1
+      if nreqs_p == 0:
+        if len(finish) == len(s):
+           send(Exit(self), finish)
+           sys.exit(0)
+        else:
+           send(Finish(self), s)
+           await(False)
+
+   def main():
+      def anounce():
+          output("In cs!")
+      while True:
+          cs(anounce)
+
+   # when receiving request from others, enque and reply
+   def OnRequest(req, srcid):
+      if ((reqc > req or ( reqc == req and self < srcid)) or (requesting == False)):
+          send(Reply(logical_clock(), self), _source)
+      else:
+          exists = False
+          for p2 in defer:
+              if p2 == srcid:
+                  exists = True
+                  break
+          if exists == False:
+              defer.append(srcid)
+
+   def OnReply(req, srcid):
+      if srcid not in earlier:
+         if req > reqc:
+            earlier.append(srcid)
+            recv_reply_count += 1
+
+   def OnFinish(srcid):
+      finish.append(srcid)
+
+   def OnExit(srcid):
+      sys.exit(0)
+         
+## 2. RA Token clear version
+
+class RAToken(DistProcess):
+   def setup(s, nreqs_tmp):
+      request = []
+      token = []
+      token.append((self, -1))
+      for p0 in s:
+        token.append((p0, -1))
+      if len(s) == 0 or (self < min(s)):
+        token_present = True
+      else:
+        token_present = False
+      token_arrived = False
+      token_held = False
+      finish = []
+      nreqs_p = nreqs_tmp
+
+   def cs(task):
+
+      # to enter cs, enqueue and send request to all
+      --request
+      output("request cs")
+      if (token_present == False):
+        reqc = logical_clock()
+        request.append((self, reqc))
+        send(Request(reqc, self), s)
+        await(token_arrived)
+        token_arrived = False
+        token_present = True
+      token_held = True
+
+      # critical section
+      task()
+      work()
+
+      # to exit cs, dequeue and send release to all
+      --release
+      output("release cs")
+      for (cc1, pp1) in [(c1, p1) for (c1, p1) in token if c1 == self]:
+        token.remove((cc1,pp1))
+        token.append((cc1,logical_clock()))
+      token_held = False
+      for d2 in [c2 for (c2, p2) in request for (c3, p3) in token if (c2 == c3 and p2 >= p3)]:
+        if token_present == True:
+           token_present = False
+           send(Token(token), d2)
+      nreqs_p -= 1
+      if nreqs_p == 0 and token_present == False:
+        send(Finish(self), s)
+        await(False)
+      if nreqs_p == 0 and len(finish) == len(s):
+        send(Exit(self), finish)
+        sys.exit(0)
+
+   def main():
+      def anounce():
+         output("In cs!")
+      while True:
+         cs(anounce)
+
+   # when receiving request from others, enque and reply
+   def OnRequest(req, srcid):
+      for (req_stale) in [(reqoldtmp) for (srctmp, reqoldtmp) in request if srctmp == srcid]:
+         req = max(req, req_stale)
+         request.remove((srcid, req_stale))
+      request.append((srcid, req))
+
+      if (token_present == True and token_held == False):
+         for (cc4, pp4) in [(c4, p4) for (c4, p4) in token if c4 == self]:
+            token.remove((cc4, pp4))
+            token.append((cc4, logical_clock()))
+         token_held = False
+         for d5 in [c5 for (c5, p5) in request for (c6, p6) in token if (c5 == c6 and p5 >= p6)]:
+            if token_present == True:
+              token_present = False
+              send(Token(token), d5)
+
+   def OnToken(rtoken):
+      token = rtoken
+      token_arrived = True
+
+   def OnFinish(srcid):
+      finish.append(srcid)
+
+   def OnExit(srcid):
+      sys.exit(0)
+
+## RA Token efficient version
+
+class RAToken_eff(DistProcess):
+   def setup(s, nreqs_tmp):
+      request = []
+      token = []
+      token.append((self, -1))
+      for p0 in s:
+        token.append((p0, -1))
+      if len(s) == 0 or (self < min(s)):
+        token_present = True
+      else:
+        token_present = False
+      token_arrived = False
+      token_held = False
+      finish = []
+      nreqs_p = nreqs_tmp
+
+   def cs(task):
+
+      # to enter cs, enqueue and send request to all
+      --request
+      output("request cs")
+      if (token_present == False):
+        reqc = logical_clock()
+        request.append((self, reqc))
+        send(Request(reqc, self), s)
+        await(token_arrived)
+        token_arrived = False
+        token_present = True
+      token_held = True
+
+      # critical section
+      task()
+      work()
+
+      # to exit cs, dequeue and send release to all
+      --release
+      output("release cs")
+      for (c1, p1) in token:
+        if c1 == self:
+           token.remove((c1,p1))
+           token.append((c1,logical_clock()))
+           break
+      token_held = False
+      for (c2, p2) in request:
+        for (c3, p3) in token:
+           if c2 == c3 and p2 >= p3 and token_present == True:
+              token_present = False
+              send(Token(token), c2)
+              break
+      nreqs_p -= 1
+      if nreqs_p == 0 and token_present == False:
+        send(Finish(self), s)
+        await(False)
+      if nreqs_p == 0 and len(finish) == len(s):
+        send(Exit(self), finish)
+        sys.exit(0)
+
+   def main():
+      def anounce():
+         output("In cs!")
+      while True:
+         cs(anounce)
+
+   # when receiving request from others, enque and reply
+   def OnRequest(req, srcid):
+      for (src, req_stale) in request:
+         if (srcid == src):
+            req = max(req, req_stale)
+            request.remove((srcid, req_stale))
+            break
+      request.append((srcid, req))
+
+      if (token_present == True and token_held == False):
+         for (c4,p4) in token:
+            if c4 == self:
+              token.remove((c4, p4))
+              token.append((c4, logical_clock()))
+              break
+         for (c5, p5) in request:
+            for (c6, p6) in token:
+              if c5 == c6 and p5 >= p6 and token_present == True:
+                token_present = False
+                send(Token(token), c5)
+                break
+
+   def OnToken(rtoken):
+      token = rtoken
+      token_arrived = True
+
+   def OnFinish(srcid):
+      finish.append(srcid)
+
+   def OnExit(srcid):
+      sys.exit(0)
+
+## Driver
+
+def main():
+   nprocs = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+   nreqs  = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+   times  = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+   step   = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+   use_channel("tcp")
+
+   print ("\n\n\n1. Running Ricart Agrawala Timestamp based algorithm, Clear version:\n\n\n")
+   rmutex_measurements = []
+   for i in range(0, times):
+      start = time.time()
+      ps = createprocs(RATimestamp, nprocs)
+      for p in ps: setupprocs({p}, [ps-{p}, nreqs + (i * step)])
+      startprocs(ps)
+      for p in ps: p.join()
+      end = time.time()
+      rmutex_measurements.append((nreqs + (i*step), end - start))
+
+   print ("\n\n\n2. Running Ricart Agrawala Timestamp based algorithm, Efficient version:\n\n\n")
+   rmutex_eff_measurements = []
+   for i in range(0, times):
+      start = time.time()
+      ps = createprocs(RATimestamp_eff, nprocs)
+      for p in ps: setupprocs({p}, [ps-{p}, nreqs])
+      startprocs(ps)
+      for p in ps: p.join()
+      end = time.time()
+      rmutex_eff_measurements.append((nreqs + (i*step), end - start))
+
+   print ("\n\n\n3. Running Ricart Agrawala Token based algorithm, Clear version:\n\n\n")
+   rtoken_measurements = []
+   for i in range(0, times):
+      start = time.time()
+      ps = createprocs(RAToken, nprocs)
+      for p in ps: setupprocs({p}, [ps-{p}, nreqs])
+      startprocs(ps)
+      for p in ps: p.join()
+      end = time.time()
+      rtoken_measurements.append((nreqs + (i*step), end - start))
+
+   print ("\n\n\n4. Running Ricart Agrawala Token based algorithm, Efficient version:\n\n\n")
+   rtoken_eff_measurements = []
+   for i in range(0, times):
+      start = time.time()
+      ps = createprocs(RAToken_eff, nprocs)
+      for p in ps: setupprocs({p}, [ps-{p}, nreqs])
+      startprocs(ps)
+      for p in ps: p.join()
+      end = time.time()
+      rtoken_eff_measurements.append((nreqs + (i*step), end - start))
+
+
+   print ("\n\n\nStatistics: processes: %d, requests: %d, times: %d, step: %d" % (nprocs, nreqs, times, step))
+   print ("\n1. Ricart Agrawala Timestamp based algorithm\n")
+   print ("%10s | %20s | %20s" % ("Requests", "Clear version", "Efficient version"))
+   print ("-----------+----------------------+----------------------")
+   for i in range(0, len(rmutex_measurements)):
+      print ("%10d | %20.2f | %20.2f" % (rmutex_measurements[i][0], rmutex_measurements[i][1], rmutex_eff_measurements[i][1]))
+   print ("\n2. Ricart Agrawala Token based algorithm\n")
+   print ("%10s | %20s | %20s" % ("Requests", "Clear version", "Efficient version"))
+   print ("-----------+----------------------+----------------------")
+   for i in range(0, len(rtoken_measurements)):
+      print ("%10d | %20.2f | %20.2f" % (rtoken_measurements[i][0], rtoken_measurements[i][1], rtoken_eff_measurements[i][1]))
